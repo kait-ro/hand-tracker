@@ -7,7 +7,7 @@ venv/
 
 # MediaPipe Model (downloaded automatically)
 hand_landmarker.task
-
+gesture_recognizer.task
 # OS Specific
 .DS_Store
 Thumbs.db

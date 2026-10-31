@@ -2,7 +2,6 @@ import time
 from collections import deque
 
 import cv2
-import numpy as np
 from Xlib import X, display
 from Xlib.ext import xtest
 
@@ -10,19 +9,13 @@ from detector import heavy_subprogram_detect
 
 traverse_point = deque(maxlen=15)
 
-# Refined thresholds for optimal balance between speed and stability
-LOST_THRESHOLD = 12
-REFRESH_INTERVAL = 5
-
 last_scroll_direction = None
 RETURN_STROKE_COOLDOWN = 0.5
 
-# Expanded window size (31x31) helps single-point LK hold onto texture much better
-LK_PARAMS = {
-    "winSize": (31, 31),
-    "maxLevel": 3,
-    "criteria": (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.03),
-}
+# Grace period: allow this many consecutive missed frames during fast motion 
+# before wiping the tracking queue
+LOST_TOLERANCE = 5
+missing_frames = 0
 
 x11_display = display.Display()
 SCROLL_COOLDOWN = 0.001
@@ -45,8 +38,8 @@ def append_tracking_point(point):
     if traverse_point:
         previous_point = traverse_point[-1]
         smoothed_point = (
-            int(previous_point[0] * 0.7 + point[0] * 0.3),
-            int(previous_point[1] * 0.7 + point[1] * 0.3),
+            int(previous_point[0] * 0.6 + point[0] * 0.4),
+            int(previous_point[1] * 0.6 + point[1] * 0.4),
         )
     else:
         smoothed_point = point
@@ -103,12 +96,8 @@ def evaluate_swipe():
 
 
 def main():
+    global missing_frames
     capture = cv2.VideoCapture(0)
-
-    tracked_point = None
-    prev_gray = None
-    lost_frames = 0
-    frames_since_refresh = 0
 
     while capture.isOpened():
         ret, frame = capture.read()
@@ -116,60 +105,24 @@ def main():
             continue
 
         frame = cv2.flip(frame, 1)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        need_detect = (
-            tracked_point is None
-            or lost_frames > LOST_THRESHOLD
-            or frames_since_refresh >= REFRESH_INTERVAL
-        )
+        result = heavy_subprogram_detect(frame)
 
-        if need_detect:
-            result = heavy_subprogram_detect(frame)
-            
-            if result == "PALM":
-                print("Open palm detected. Shutting down...")
-                break
-                
-            elif result is not None:
-                tracked_point = result
-                lost_frames = 0
-                frames_since_refresh = 0
-            else:
-                tracked_point = None
-                lost_frames += 1
-        else:
-            prev_pts = np.array([[tracked_point]], dtype=np.float32)
-            next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-                prev_gray, gray, prev_pts, None, **LK_PARAMS
-            )
-
-            tracked_ok = status is not None and status[0][0] == 1
-            if tracked_ok:
-                x, y = next_pts[0][0]
-                h, w = gray.shape
-                if 0 <= x < w and 0 <= y < h:
-                    tracked_point = (int(x), int(y))
-                    lost_frames = 0
-                    frames_since_refresh += 1
-                else:
-                    tracked_point = None
-                    lost_frames += 1
-            else:
-                tracked_point = None
-                lost_frames += 1
-
-        if tracked_point is not None:
-            cv2.circle(frame, tracked_point, 6, (0, 0, 255), -1)
-            append_tracking_point(tracked_point)
+        if result == "PALM":
+            print("Open palm detected. Shutting down...")
+            break
+        elif result is not None:
+            missing_frames = 0  # Reset missing counter on successful detection
+            append_tracking_point(result)
             draw_circles(frame, traverse_point)
             evaluate_swipe()
         else:
-            traverse_point.clear()
+            missing_frames += 1
+            # Only wipe the queue if the hand is truly lost for several consecutive frames
+            if missing_frames > LOST_TOLERANCE:
+                traverse_point.clear()
 
-        prev_gray = gray
-
-        # cv2.imshow("Live Feed", frame)
+        cv2.imshow("Live Feed", frame)
         if cv2.waitKey(1) == 27:
             break
 
