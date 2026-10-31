@@ -1,0 +1,13 @@
+# Python / Environment
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# MediaPipe Model (downloaded automatically)
+hand_landmarker.task
+
+# OS Specific
+.DS_Store
+Thumbs.db
