@@ -8,47 +8,33 @@ from Xlib.ext import xtest
 
 from detector import heavy_subprogram_detect
 
-# Tracking trail length and state
 traverse_point = deque(maxlen=15)
 
-# How many consecutive frames optical flow is allowed to fail/drift before
-# we fall back to the expensive MediaPipe detector again.
-LOST_THRESHOLD = 10
-
-# Even if optical flow is tracking fine, force a MediaPipe re-detect every
-# this many frames to correct for slow drift (a fingertip is a small,
-# low-texture target and LK can lose precision silently over time).
-REFRESH_INTERVAL = 3
+# Refined thresholds for optimal balance between speed and stability
+LOST_THRESHOLD = 12
+REFRESH_INTERVAL = 5
 
 last_scroll_direction = None
-RETURN_STROKE_COOLDOWN = 0.5  # Seconds to block reverse scrolls (adjust to taste)
+RETURN_STROKE_COOLDOWN = 0.5
 
-# Lucas-Kanade optical flow parameters.
+# Expanded window size (31x31) helps single-point LK hold onto texture much better
 LK_PARAMS = {
-    "winSize": (21, 21),
+    "winSize": (31, 31),
     "maxLevel": 3,
     "criteria": (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.03),
 }
 
-# --- X11 scroll injection ---
 x11_display = display.Display()
-
-# Cooldown between injected scroll events, so one swipe doesn't fire dozens
-# of scroll ticks.
 SCROLL_COOLDOWN = 0.001
 last_active_scroll_time = 0
 last_scroll_time = 0
 
 
 def scroll_mouse(direction, multiplier=2):
-    """Injects zero-lag X11 scroll events, scaled by a multiplier."""
-    # X11 maps Button 4 to Scroll Up, Button 5 to Scroll Down.
     button = 4 if direction == "up" else 5
-    
     for _ in range(multiplier):
         xtest.fake_input(x11_display, X.ButtonPress, button)
         xtest.fake_input(x11_display, X.ButtonRelease, button)
-        
     x11_display.sync()
 
 
@@ -102,25 +88,16 @@ def evaluate_swipe():
         current_direction = "down"
 
     if current_direction:
-        # Hysteresis: block reverse scrolls during the return stroke
         if current_direction != last_scroll_direction:
             if current_time - last_active_scroll_time < RETURN_STROKE_COOLDOWN:
-                # YOUR FIX: Nuke the tracking data!
-                # This kills the false reverse swipe immediately and forces a 10-frame "neutral" reset.
                 traverse_point.clear()
                 return
-
             last_scroll_direction = current_direction
 
-        # Execute scroll
         scroll_mouse(current_direction, multiplier=2)
         last_scroll_time = current_time
         last_active_scroll_time = current_time
-
     else:
-        # YOUR FIX PART 2: The hand stopped moving (delta_y is between -40 and 40).
-        # If the hand has been still for a brief moment, reset the direction history
-        # so the next movement is treated as a fresh swipe, no matter the direction.
         if current_time - last_active_scroll_time > 0.2:
             last_scroll_direction = None
 
@@ -128,7 +105,7 @@ def evaluate_swipe():
 def main():
     capture = cv2.VideoCapture(0)
 
-    tracked_point = None  # (x, y) in pixel coords, or None if no active track
+    tracked_point = None
     prev_gray = None
     lost_frames = 0
     frames_since_refresh = 0
@@ -148,12 +125,11 @@ def main():
         )
 
         if need_detect:
-            # Expensive path: run MediaPipe once to (re)acquire the fingertip.
             result = heavy_subprogram_detect(frame)
             
             if result == "PALM":
                 print("Open palm detected. Shutting down...")
-                break  # Kills the while loop and exits the program
+                break
                 
             elif result is not None:
                 tracked_point = result
@@ -163,7 +139,6 @@ def main():
                 tracked_point = None
                 lost_frames += 1
         else:
-            # Cheap path: carry the point forward with Lucas-Kanade optical flow.
             prev_pts = np.array([[tracked_point]], dtype=np.float32)
             next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
                 prev_gray, gray, prev_pts, None, **LK_PARAMS
@@ -190,9 +165,6 @@ def main():
             draw_circles(frame, traverse_point)
             evaluate_swipe()
         else:
-            # Wipes the trailing data the instant the hand leaves the frame.
-            # When the hand returns, evaluate_swipe() is blocked until 
-            # 10 fresh frames establish a new neutral baseline.
             traverse_point.clear()
 
         prev_gray = gray
