@@ -158,7 +158,7 @@ def main():
                         traverse_point.clear()
 
             # Optional: Uncomment if you want visual feedback when debugging
-            cv2.imshow("Live Feed", frame)
+            # cv2.imshow("Live Feed", frame)
             if cv2.waitKey(1) == 27:  # ESC key still acts as a manual fallback exit
                 break
     finally:
