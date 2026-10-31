@@ -11,3 +11,7 @@ gesture_recognizer.task
 # OS Specific
 .DS_Store
 Thumbs.db
+
+#TESTING
+detectorALT2.py
+mainALT2.py
