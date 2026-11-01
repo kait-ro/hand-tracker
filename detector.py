@@ -14,6 +14,7 @@ if not os.path.exists(model_path):
     )
 
 base_options = python.BaseOptions(model_asset_path=model_path)
+# Relaxed confidence for a much more responsive/lax experience
 options = vision.GestureRecognizerOptions(
     base_options=base_options,
     num_hands=1,
@@ -23,11 +24,10 @@ options = vision.GestureRecognizerOptions(
 
 recognizer = vision.GestureRecognizer.create_from_options(options)
 
-THUMB_TIP = 4
 INDEX_FINGER_TIP = 8
 
 def heavy_subprogram_detect(frame):
-    """Returns 'THUMB_UP', 'PALM', or a dict containing index fingertip and thumb tip coordinates."""
+    """Returns 'PALM', 'VICTORY', or the index fingertip (x, y) coordinate tuple."""
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
@@ -36,21 +36,28 @@ def heavy_subprogram_detect(frame):
     if not recognition_result.hand_landmarks:
         return None
 
-    if recognition_result.gestures:
-        top_gesture = recognition_result.gestures[0][0]
-        if top_gesture.score > 0.5:
-            if top_gesture.category_name == "Thumb_Up":
-                return "THUMB_UP"
-            elif top_gesture.category_name == "Open_Palm":
-                return "PALM"
-
     first_hand_landmarks = recognition_result.hand_landmarks[0]
     h, w, _ = frame.shape
-    
-    index_tip = first_hand_landmarks[INDEX_FINGER_TIP]
-    thumb_tip = first_hand_landmarks[THUMB_TIP]
 
-    return {
-        "index": (int(index_tip.x * w), int(index_tip.y * h)),
-        "thumb": (int(thumb_tip.x * w), int(thumb_tip.y * h))
-    }
+    # 1. Lax Geometric Open Palm Check: 
+    # Allows a bit of margin where fingers just need to be extended upward generally
+    finger_tip_ids = [8, 12, 16, 20]
+    finger_pip_ids = [6, 10, 14, 18]
+    open_fingers = 0
+    for tip, pip in zip(finger_tip_ids, finger_pip_ids):
+        if first_hand_landmarks[tip].y < first_hand_landmarks[pip].y:
+            open_fingers += 1
+            
+    if open_fingers >= 4:
+        return "PALM"
+
+    # 2. Lax Model-Level Victory Sign Check
+    if recognition_result.gestures:
+        top_gesture = recognition_result.gestures[0][0]
+        # Lowered score threshold (0.45) to make V gesture very lax/easy to trigger
+        if top_gesture.score > 0.45 and top_gesture.category_name == "Victory":
+            return "VICTORY"
+
+    # Return pure index fingertip tuple for tracking & mouse control
+    index_tip = first_hand_landmarks[INDEX_FINGER_TIP]
+    return (int(index_tip.x * w), int(index_tip.y * h))

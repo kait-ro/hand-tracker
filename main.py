@@ -1,5 +1,6 @@
 import math
 import os
+import subprocess
 import time
 from collections import deque
 
@@ -17,7 +18,10 @@ traverse_point = deque(maxlen=15)
 
 swipe_active = False
 mouse_active = False
-gesture_latched = False
+
+# Cooldown lock timestamp to prevent double-registering / rapid re-toggling
+last_toggle_time = 0
+TOGGLE_COOLDOWN = 1.5  # Seconds to wait before accepting another toggle
 
 LOST_TOLERANCE = 5
 missing_frames = 0
@@ -32,17 +36,11 @@ SCROLL_COOLDOWN = 0.001
 last_active_scroll_time = 0
 last_scroll_time = 0
 
-# --- Proper Pinch Configuration ---
-PINCH_THRESHOLD = 18
-PINCH_FRAMES_REQUIRED = 2
-pinch_frame_counter = 0
-is_pinched = False
-
-# Absolute Mode smoothing, re-swipe, and precision variables
+# Absolute Mode butter-smooth animation, deadzone, and precision variables
 prev_cursor_pos = None
 smooth_abs_x = None
 smooth_abs_y = None
-RE_SWIPE_VELOCITY_LIMIT = 80  # Ignores hyper-fast repositioning jumps
+RE_SWIPE_VELOCITY_LIMIT = 100
 
 STATUS_FILE = "/tmp/swipe_status.txt"
 
@@ -50,6 +48,7 @@ def write_status(text):
     try:
         with open(STATUS_FILE, "w") as f:
             f.write(text)
+        subprocess.run(["pkill", "-SIGRTMIN+10", "i3blocks"], capture_output=True, check=False)
     except Exception:
         pass
 
@@ -60,16 +59,10 @@ def scroll_mouse(direction, multiplier=2):
         xtest.fake_input(x11_display, X.ButtonRelease, button)
     x11_display.sync()
 
-def trigger_left_click():
-    xtest.fake_input(x11_display, X.ButtonPress, 1)
-    xtest.fake_input(x11_display, X.ButtonRelease, 1)
-    x11_display.sync()
-
 def move_mouse_pointer(index_pos, frame_w, frame_h):
     global prev_cursor_pos, smooth_abs_x, smooth_abs_y
     x, y = index_pos
     
-    # Map camera coordinates to screen target
     target_x = (x / frame_w) * SCREEN_WIDTH
     target_y = (y / frame_h) * SCREEN_HEIGHT
     
@@ -79,23 +72,23 @@ def move_mouse_pointer(index_pos, frame_w, frame_h):
         smooth_abs_y = target_y
         return
 
-    # Check for hyper-fast repositioning (re-swipe lift-and-shift)
     raw_dx = x - prev_cursor_pos[0]
     raw_dy = y - prev_cursor_pos[1]
     prev_cursor_pos = (x, y)
     
     if math.hypot(raw_dx, raw_dy) > RE_SWIPE_VELOCITY_LIMIT:
-        # Snap smoothing anchor directly to current target to avoid sweeping across the screen
         smooth_abs_x = target_x
         smooth_abs_y = target_y
         return
 
-    # Dynamic precision scaling: slow/micro-movements get heavier smoothing (high precision),
-    # faster movements get more responsiveness.
     distance_to_target = math.hypot(target_x - smooth_abs_x, target_y - smooth_abs_y)
-    alpha = min(0.8, max(0.2, distance_to_target * 0.05))
+    
+    DEADZONE = 1.5
+    if distance_to_target < DEADZONE:
+        return
 
-    # Apply exponential smoothing for butter-smooth absolute tracking
+    alpha = min(0.5, max(0.08, distance_to_target * 0.03))
+
     smooth_abs_x = smooth_abs_x * (1.0 - alpha) + target_x * alpha
     smooth_abs_y = smooth_abs_y * (1.0 - alpha) + target_y * alpha
 
@@ -168,11 +161,11 @@ def evaluate_swipe():
             last_scroll_direction = None
 
 def main():
-    global swipe_active, mouse_active, gesture_latched, missing_frames, prev_cursor_pos, smooth_abs_x, smooth_abs_y, pinch_frame_counter, is_pinched
+    global swipe_active, mouse_active, last_toggle_time, missing_frames, prev_cursor_pos, smooth_abs_x, smooth_abs_y
     capture = cv2.VideoCapture(0)
 
     write_status("ALL: OFF")
-    print("Tracker running. Thumbs Up = Toggle Swipe | Open Palm = Toggle Mouse Control (Absolute) | Proper Pinch = Left Click.")
+    print("Tracker running. Open Palm = Toggle Swipe | Victory Sign = Toggle Mouse Control (Absolute).")
 
     try:
         while capture.isOpened():
@@ -184,42 +177,28 @@ def main():
             h, w, _ = frame.shape
 
             result = heavy_subprogram_detect(frame)
+            current_time = time.time()
 
-            if result == "THUMB_UP":
-                if not gesture_latched:
-                    gesture_latched = True
+            if result == "PALM":
+                if current_time - last_toggle_time > TOGGLE_COOLDOWN:
                     swipe_active = not swipe_active
+                    last_toggle_time = current_time
                     traverse_point.clear()
                     update_i3_status()
                     print(f"[INFO] Swipe Mode: {'ACTIVATED' if swipe_active else 'DEACTIVATED'}")
 
-            elif result == "PALM":
-                if not gesture_latched:
-                    gesture_latched = True
+            elif result == "VICTORY":
+                if current_time - last_toggle_time > TOGGLE_COOLDOWN:
                     mouse_active = not mouse_active
+                    last_toggle_time = current_time
                     prev_cursor_pos = None
                     smooth_abs_x = None
                     smooth_abs_y = None
                     update_i3_status()
                     print(f"[INFO] Mouse Mode (ABSOLUTE): {'ACTIVATED' if mouse_active else 'DEACTIVATED'}")
 
-            elif isinstance(result, dict):
-                gesture_latched = False
-                
-                index_pos = result["index"]
-                thumb_pos = result["thumb"]
-                
-                # --- Proper Pinch-to-Click with Multi-Frame Debounce ---
-                pinch_distance = math.hypot(index_pos[0] - thumb_pos[0], index_pos[1] - thumb_pos[1])
-                
-                if pinch_distance < PINCH_THRESHOLD:
-                    pinch_frame_counter += 1
-                    if pinch_frame_counter >= PINCH_FRAMES_REQUIRED and not is_pinched:
-                        trigger_left_click()
-                        is_pinched = True
-                else:
-                    pinch_frame_counter = 0
-                    is_pinched = False
+            elif isinstance(result, tuple):
+                index_pos = result
                 
                 # Handle Swipe logic
                 if swipe_active:
@@ -228,14 +207,10 @@ def main():
                     draw_circles(frame, traverse_point)
                     evaluate_swipe()
                 
-                # Handle Smoothed Absolute Mouse movement logic
+                # Handle Absolute Mouse movement logic
                 if mouse_active:
                     move_mouse_pointer(index_pos, w, h)
             else:
-                gesture_latched = False
-                pinch_frame_counter = 0
-                is_pinched = False
-                
                 if swipe_active:
                     missing_frames += 1
                     if missing_frames > LOST_TOLERANCE:
@@ -244,9 +219,6 @@ def main():
                     prev_cursor_pos = None
                     smooth_abs_x = None
                     smooth_abs_y = None
-
-            # Optional visual feedback (uncomment to debug)
-            # cv2.imshow("Live Feed", frame)
 
             if cv2.waitKey(1) == 27:
                 break
