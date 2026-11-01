@@ -44,13 +44,17 @@ RE_SWIPE_VELOCITY_LIMIT = 100
 
 STATUS_FILE = "/tmp/swipe_status.txt"
 
+
 def write_status(text):
     try:
         with open(STATUS_FILE, "w") as f:
             f.write(text)
-        subprocess.run(["pkill", "-SIGRTMIN+10", "i3blocks"], capture_output=True, check=False)
+        subprocess.run(
+            ["pkill", "-SIGRTMIN+10", "i3blocks"], capture_output=True, check=False
+        )
     except Exception:
         pass
+
 
 def scroll_mouse(direction, multiplier=2):
     button = 4 if direction == "up" else 5
@@ -59,13 +63,14 @@ def scroll_mouse(direction, multiplier=2):
         xtest.fake_input(x11_display, X.ButtonRelease, button)
     x11_display.sync()
 
+
 def move_mouse_pointer(index_pos, frame_w, frame_h):
     global prev_cursor_pos, smooth_abs_x, smooth_abs_y
     x, y = index_pos
-    
+
     target_x = (x / frame_w) * SCREEN_WIDTH
     target_y = (y / frame_h) * SCREEN_HEIGHT
-    
+
     if prev_cursor_pos is None:
         prev_cursor_pos = (x, y)
         smooth_abs_x = target_x
@@ -75,28 +80,34 @@ def move_mouse_pointer(index_pos, frame_w, frame_h):
     raw_dx = x - prev_cursor_pos[0]
     raw_dy = y - prev_cursor_pos[1]
     prev_cursor_pos = (x, y)
-    
+
+    # Fast jump safeguard (if you move your hand rapidly across the screen)
     if math.hypot(raw_dx, raw_dy) > RE_SWIPE_VELOCITY_LIMIT:
         smooth_abs_x = target_x
         smooth_abs_y = target_y
         return
 
     distance_to_target = math.hypot(target_x - smooth_abs_x, target_y - smooth_abs_y)
-    
-    DEADZONE = 1.5
+
+    # Increased deadzone to completely swallow static hand tremors and camera noise
+    DEADZONE = 3.0
     if distance_to_target < DEADZONE:
         return
 
-    alpha = min(0.5, max(0.08, distance_to_target * 0.03))
+    # Adaptive Alpha: Drop the minimum floor down to 0.015 for absolute rock-solid stillness,
+    # while scaling up smoothly when you move your hand across the screen.
+    alpha = min(0.6, max(0.015, distance_to_target * 0.04))
 
     smooth_abs_x = smooth_abs_x * (1.0 - alpha) + target_x * alpha
     smooth_abs_y = smooth_abs_y * (1.0 - alpha) + target_y * alpha
 
-    final_x = max(0, min(SCREEN_WIDTH, int(smooth_abs_x)))
-    final_y = max(0, min(SCREEN_HEIGHT, int(smooth_abs_y)))
+    final_x = max(0, min(SCREEN_WIDTH, int(round(smooth_abs_x))))
+    final_y = max(0, min(SCREEN_HEIGHT, int(round(smooth_abs_y))))
 
+    # Only fire X11 motion if coordinates actually changed
     xtest.fake_input(x11_display, X.MotionNotify, x=final_x, y=final_y)
     x11_display.sync()
+
 
 def update_i3_status():
     if swipe_active and mouse_active:
@@ -107,6 +118,7 @@ def update_i3_status():
         write_status("SWIPE: OFF | MOUSE: ABSOLUTE")
     else:
         write_status("ALL: OFF")
+
 
 def append_tracking_point(point):
     if point is None:
@@ -121,6 +133,7 @@ def append_tracking_point(point):
         smoothed_point = point
     traverse_point.append(smoothed_point)
 
+
 def draw_circles(frame, traverse_point):
     if not traverse_point:
         return
@@ -130,6 +143,7 @@ def draw_circles(frame, traverse_point):
     for point in points:
         cv2.circle(frame, point, 4, (0, 255, 255), -1)
         cv2.circle(frame, point, 7, (0, 200, 255), 1)
+
 
 def evaluate_swipe():
     global last_scroll_time, last_active_scroll_time, last_scroll_direction
@@ -160,12 +174,22 @@ def evaluate_swipe():
         if current_time - last_active_scroll_time > 0.2:
             last_scroll_direction = None
 
+
 def main():
-    global swipe_active, mouse_active, last_toggle_time, missing_frames, prev_cursor_pos, smooth_abs_x, smooth_abs_y
+    global \
+        swipe_active, \
+        mouse_active, \
+        last_toggle_time, \
+        missing_frames, \
+        prev_cursor_pos, \
+        smooth_abs_x, \
+        smooth_abs_y
     capture = cv2.VideoCapture(0)
 
     write_status("ALL: OFF")
-    print("Tracker running. Open Palm = Toggle Swipe | Victory Sign = Toggle Mouse Control (Absolute).")
+    print(
+        "Tracker running. Open Palm = Toggle Swipe | Victory Sign = Toggle Mouse Control (Absolute)."
+    )
 
     try:
         while capture.isOpened():
@@ -185,7 +209,9 @@ def main():
                     last_toggle_time = current_time
                     traverse_point.clear()
                     update_i3_status()
-                    print(f"[INFO] Swipe Mode: {'ACTIVATED' if swipe_active else 'DEACTIVATED'}")
+                    print(
+                        f"[INFO] Swipe Mode: {'ACTIVATED' if swipe_active else 'DEACTIVATED'}"
+                    )
 
             elif result == "VICTORY":
                 if current_time - last_toggle_time > TOGGLE_COOLDOWN:
@@ -195,18 +221,20 @@ def main():
                     smooth_abs_x = None
                     smooth_abs_y = None
                     update_i3_status()
-                    print(f"[INFO] Mouse Mode (ABSOLUTE): {'ACTIVATED' if mouse_active else 'DEACTIVATED'}")
+                    print(
+                        f"[INFO] Mouse Mode (ABSOLUTE): {'ACTIVATED' if mouse_active else 'DEACTIVATED'}"
+                    )
 
             elif isinstance(result, tuple):
                 index_pos = result
-                
+
                 # Handle Swipe logic
                 if swipe_active:
                     missing_frames = 0
                     append_tracking_point(index_pos)
                     draw_circles(frame, traverse_point)
                     evaluate_swipe()
-                
+
                 # Handle Absolute Mouse movement logic
                 if mouse_active:
                     move_mouse_pointer(index_pos, w, h)
@@ -227,6 +255,7 @@ def main():
             os.remove(STATUS_FILE)
         cv2.destroyAllWindows()
         capture.release()
+
 
 if __name__ == "__main__":
     main()
