@@ -21,7 +21,7 @@ mouse_active = False
 
 # Cooldown lock timestamp to prevent double-registering / rapid re-toggling
 last_toggle_time = 0
-TOGGLE_COOLDOWN = 1.5  # Seconds to wait before accepting another toggle
+TOGGLE_COOLDOWN = 1.5
 
 LOST_TOLERANCE = 5
 missing_frames = 0
@@ -41,6 +41,10 @@ prev_cursor_pos = None
 smooth_abs_x = None
 smooth_abs_y = None
 RE_SWIPE_VELOCITY_LIMIT = 100
+
+# Left click variables
+last_click_time = 0
+CLICK_COOLDOWN = 0.4  
 
 STATUS_FILE = "/tmp/swipe_status.txt"
 
@@ -64,6 +68,16 @@ def scroll_mouse(direction, multiplier=2):
     x11_display.sync()
 
 
+def perform_left_click():
+    global last_click_time
+    current_time = time.time()
+    if current_time - last_click_time > CLICK_COOLDOWN:
+        xtest.fake_input(x11_display, X.ButtonPress, 1)
+        xtest.fake_input(x11_display, X.ButtonRelease, 1)
+        x11_display.sync()
+        last_click_time = current_time
+
+
 def move_mouse_pointer(index_pos, frame_w, frame_h):
     global prev_cursor_pos, smooth_abs_x, smooth_abs_y
     x, y = index_pos
@@ -81,7 +95,6 @@ def move_mouse_pointer(index_pos, frame_w, frame_h):
     raw_dy = y - prev_cursor_pos[1]
     prev_cursor_pos = (x, y)
 
-    # Fast jump safeguard (if you move your hand rapidly across the screen)
     if math.hypot(raw_dx, raw_dy) > RE_SWIPE_VELOCITY_LIMIT:
         smooth_abs_x = target_x
         smooth_abs_y = target_y
@@ -89,14 +102,11 @@ def move_mouse_pointer(index_pos, frame_w, frame_h):
 
     distance_to_target = math.hypot(target_x - smooth_abs_x, target_y - smooth_abs_y)
 
-    # Increased deadzone to completely swallow static hand tremors and camera noise
-    DEADZONE = 3.0
+    DEADZONE = 6.0
     if distance_to_target < DEADZONE:
         return
 
-    # Adaptive Alpha: Drop the minimum floor down to 0.015 for absolute rock-solid stillness,
-    # while scaling up smoothly when you move your hand across the screen.
-    alpha = min(0.6, max(0.015, distance_to_target * 0.04))
+    alpha = min(0.4, max(0.01, distance_to_target * 0.015))
 
     smooth_abs_x = smooth_abs_x * (1.0 - alpha) + target_x * alpha
     smooth_abs_y = smooth_abs_y * (1.0 - alpha) + target_y * alpha
@@ -104,7 +114,6 @@ def move_mouse_pointer(index_pos, frame_w, frame_h):
     final_x = max(0, min(SCREEN_WIDTH, int(round(smooth_abs_x))))
     final_y = max(0, min(SCREEN_HEIGHT, int(round(smooth_abs_y))))
 
-    # Only fire X11 motion if coordinates actually changed
     xtest.fake_input(x11_display, X.MotionNotify, x=final_x, y=final_y)
     x11_display.sync()
 
@@ -167,7 +176,7 @@ def evaluate_swipe():
                 return
             last_scroll_direction = current_direction
 
-        scroll_mouse(current_direction, multiplier=2)
+        scroll_mouse(current_direction, multiplier=1)
         last_scroll_time = current_time
         last_active_scroll_time = current_time
     else:
@@ -188,7 +197,7 @@ def main():
 
     write_status("ALL: OFF")
     print(
-        "Tracker running. Open Palm = Toggle Swipe | Victory Sign = Toggle Mouse Control (Absolute)."
+        "Tracker running. Open Palm = Toggle Swipe | Victory Sign = Toggle Mouse | Pinch Middle+Thumb = Left Click."
     )
 
     try:
@@ -200,7 +209,8 @@ def main():
             frame = cv2.flip(frame, 1)
             h, w, _ = frame.shape
 
-            result = heavy_subprogram_detect(frame)
+            # Pass mouse_active state directly into the detector
+            result = heavy_subprogram_detect(frame, mouse_active)
             current_time = time.time()
 
             if result == "PALM":
@@ -226,7 +236,13 @@ def main():
                     )
 
             elif isinstance(result, tuple):
-                index_pos = result
+                is_click = False
+                
+                if len(result) == 2 and isinstance(result[0], str) and result[0] == "CLICK":
+                    index_pos = result[1]
+                    is_click = True
+                else:
+                    index_pos = result
 
                 # Handle Swipe logic
                 if swipe_active:
@@ -238,6 +254,9 @@ def main():
                 # Handle Absolute Mouse movement logic
                 if mouse_active:
                     move_mouse_pointer(index_pos, w, h)
+                    if is_click:
+                        perform_left_click()
+                        
             else:
                 if swipe_active:
                     missing_frames += 1

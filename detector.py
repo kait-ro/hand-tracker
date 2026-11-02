@@ -1,5 +1,6 @@
 import os
 import urllib.request
+import math
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -14,7 +15,6 @@ if not os.path.exists(model_path):
     )
 
 base_options = python.BaseOptions(model_asset_path=model_path)
-# Relaxed confidence for a much more responsive/lax experience
 options = vision.GestureRecognizerOptions(
     base_options=base_options,
     num_hands=1,
@@ -25,9 +25,11 @@ options = vision.GestureRecognizerOptions(
 recognizer = vision.GestureRecognizer.create_from_options(options)
 
 INDEX_FINGER_TIP = 8
+MIDDLE_FINGER_TIP = 12
+THUMB_TIP = 4
 
-def heavy_subprogram_detect(frame):
-    """Returns 'PALM', 'VICTORY', or the index fingertip (x, y) coordinate tuple."""
+def heavy_subprogram_detect(frame, mouse_active=False):
+    """Returns 'PALM', 'VICTORY', ('CLICK', (x,y)), or the index fingertip (x, y) coordinate tuple."""
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
@@ -39,8 +41,7 @@ def heavy_subprogram_detect(frame):
     first_hand_landmarks = recognition_result.hand_landmarks[0]
     h, w, _ = frame.shape
 
-    # 1. Lax Geometric Open Palm Check: 
-    # Allows a bit of margin where fingers just need to be extended upward generally
+    # 1. Lax Geometric Open Palm Check
     finger_tip_ids = [8, 12, 16, 20]
     finger_pip_ids = [6, 10, 14, 18]
     open_fingers = 0
@@ -54,10 +55,22 @@ def heavy_subprogram_detect(frame):
     # 2. Lax Model-Level Victory Sign Check
     if recognition_result.gestures:
         top_gesture = recognition_result.gestures[0][0]
-        # Lowered score threshold (0.45) to make V gesture very lax/easy to trigger
         if top_gesture.score > 0.45 and top_gesture.category_name == "Victory":
             return "VICTORY"
 
-    # Return pure index fingertip tuple for tracking & mouse control
     index_tip = first_hand_landmarks[INDEX_FINGER_TIP]
-    return (int(index_tip.x * w), int(index_tip.y * h))
+    index_pos = (int(index_tip.x * w), int(index_tip.y * h))
+
+    # 3. Middle and Thumb Pinch Check (Left Click) - ONLY checked if mouse is active
+    if mouse_active:
+        thumb = first_hand_landmarks[THUMB_TIP]
+        middle = first_hand_landmarks[MIDDLE_FINGER_TIP]
+        
+        # Calculate normalized distance between thumb and middle finger
+        pinch_dist = math.hypot(thumb.x - middle.x, thumb.y - middle.y)
+        
+        if pinch_dist < 0.05:  
+            return ("CLICK", index_pos)
+
+    # Return pure index fingertip tuple for tracking & mouse control
+    return index_pos
